@@ -33,6 +33,8 @@ func run(args []string, out io.Writer) error {
 	flags := flag.NewFlagSet("kv-budget "+command, flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	modelName := flags.String("model", "llama-3.1-8b", "built-in model name")
+	config := flags.String("config", "", "Hugging Face config.json path")
+	params := flags.Float64("params", 0, "parameter count for a custom model")
 	precision := flags.String("precision", "fp16", "weight precision (fp16, fp8, int4)")
 	kvPrecision := flags.String("kv-precision", "fp16", "KV precision (fp16, fp8)")
 	var opts options
@@ -66,9 +68,9 @@ func run(args []string, out io.Writer) error {
 		return fmt.Errorf("unexpected argument %q", flags.Arg(0))
 	}
 
-	m, ok := models[*modelName]
-	if !ok {
-		return fmt.Errorf("unknown model %q", *modelName)
+	m, err := selectModel(*modelName, *config, *params)
+	if err != nil {
+		return err
 	}
 	opts.weightBytes = bytesFor(*precision)
 	if opts.weightBytes == 0 {
@@ -81,8 +83,19 @@ func run(args []string, out io.Writer) error {
 	if !validGB(opts.reserveGB) {
 		return errors.New("reserve-gb must be finite and nonnegative")
 	}
+	custom, explicitContext := false, false
+	flags.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "vram", "bandwidth":
+			custom = true
+		case "context":
+			explicitContext = true
+		}
+	})
 	if command == "sweep" {
 		context = m.maxCtx
+	} else if !explicitContext {
+		context = min(context, m.maxCtx)
 	}
 	if context < 1 || context > m.maxCtx {
 		return fmt.Errorf("context must be between 1 and %d", m.maxCtx)
@@ -99,12 +112,6 @@ func run(args []string, out io.Writer) error {
 		return printTable(out, rows)
 	}
 
-	custom := false
-	flags.Visit(func(f *flag.Flag) {
-		if f.Name == "vram" || f.Name == "bandwidth" {
-			custom = true
-		}
-	})
 	g, err := selectGPU(gpuName, vram, bandwidth, custom)
 	if err != nil {
 		return err
